@@ -1,0 +1,752 @@
+# Proyecto Completo - Generado el Sat Mar  8 00:52:42 2025
+# Estructura y contenido de archivos clave (sin bases de datos)
+
+
+================================================================================
+# Archivo: main.js
+================================================================================
+
+const { app, BrowserWindow, ipcMain, protocol } = require('electron');
+const path = require('path');
+const fs = require('fs');
+
+const MUSIC_DIR = process.env.MUSIC_DIR || process.argv[2] || 'D:\\musica_convertida';
+if (!fs.existsSync(MUSIC_DIR)) {
+    console.error(`La carpeta de música "${MUSIC_DIR}" no existe.`);
+    process.exit(1);
+}
+
+let songsDatabase = [];
+try {
+    const dbPath = path.join(__dirname, 'db.json');
+    if (fs.existsSync(dbPath)) {
+        songsDatabase = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    } else {
+        console.error("Archivo db.json no encontrado.");
+    }
+} catch (error) {
+    console.error("Error al cargar la base de datos:", error);
+}
+
+const backgroundVideos = [
+    { id: "bg1", path: "1.mp4" },
+    { id: "bg2", path: "2.mp4" },
+    { id: "bg3", path: "3.mp4" }
+];
+const promoVideo = { path: "rockola.mp4" };
+
+function createWindow() {
+    let win = new BrowserWindow({
+        width: 1280,
+        height: 720,
+        fullscreen: true,
+        kiosk: true,
+        webPreferences: { 
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: path.join(__dirname, 'preload.js')
+        },
+        frame: false,
+        alwaysOnTop: true
+    });
+    win.webContents.openDevTools();
+    win.loadFile(path.join(__dirname, 'public/index.html'));
+    win.on('closed', () => {
+        win = null;
+        app.quit();
+    });
+}
+
+function registerProtocols() {
+    protocol.registerFileProtocol('rockola', (request, callback) => {
+        const url = request.url.substr(10);
+        let filePath;
+        
+        if (url.startsWith('musicac/')) {
+            const relativePath = url.replace('musicac/', '');
+            filePath = path.join(MUSIC_DIR, relativePath);
+            console.log(`Intentando servir archivo de música: ${filePath}`);
+        
+        } else if (url.startsWith('promo/')) {
+            filePath = path.join(__dirname, 'promo', url.replace('promo/', ''));
+        } else if (url.startsWith('background/')) {
+            filePath = path.join(__dirname, 'background', url.replace('background/', ''));
+        } else {
+            filePath = path.join(__dirname, 'public', url);
+        }
+        
+        console.log(`Sirviendo archivo: ${filePath}`);
+        callback({ path: filePath });
+    });
+}
+
+app.whenReady().then(() => {
+    registerProtocols();
+    createWindow();
+});
+
+ipcMain.handle('get-songs', (event, { page = 1, limit = 20, genre = '' }) => {
+    let songs = [...songsDatabase].sort((a, b) => a.id.localeCompare(b.id));
+    let totalSongs = songs.length;
+    
+    if (genre) {
+        songs = songs.filter(song => song.genre === genre);
+        totalSongs = songs.length;
+    }
+    
+    const startIndex = (page - 1) * limit;
+    const endIndex = page * limit;
+    const results = songs.slice(startIndex, endIndex);
+    const totalPages = Math.ceil(totalSongs / limit);
+    
+    return {
+        totalSongs,
+        totalPages,
+        currentPage: parseInt(page),
+        songs: results
+    };
+});
+
+ipcMain.handle('get-genres', () => {
+    const genres = [...new Set(songsDatabase.map(song => song.genre))].sort();
+    return genres;
+});
+
+ipcMain.handle('get-all-songs', () => {
+    return songsDatabase;
+});
+
+ipcMain.handle('get-background-video', () => {
+    return backgroundVideos[Math.floor(Math.random() * backgroundVideos.length)];
+});
+
+ipcMain.handle('get-promo-video', () => {
+    return { path: promoVideo.path };
+});
+
+app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});
+
+================================================================================
+# Archivo: preload.js
+================================================================================
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+// Exponer funciones seguras a la página web
+contextBridge.exposeInMainWorld('electronAPI', {
+    // API para obtener canciones con paginación y filtrado
+    getSongs: (params) => ipcRenderer.invoke('get-songs', params),
+    
+    // API para obtener todos los géneros musicales
+    getGenres: () => ipcRenderer.invoke('get-genres'),
+    
+    // API para obtener la lista completa de canciones (para búsqueda local)
+    getAllSongs: () => ipcRenderer.invoke('get-all-songs'),
+    
+    // API para obtener un video de fondo aleatorio
+    getBackgroundVideo: () => ipcRenderer.invoke('get-background-video'),
+    
+    // API para obtener el video promocional
+    getPromoVideo: () => ipcRenderer.invoke('get-promo-video')
+});
+
+
+================================================================================
+# Archivo: public\index.html
+================================================================================
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rockola</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .no-credits-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 2em;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div id="genreDisplay" class="genre-display">Género actual: Todos</div>
+            <div class="credits">Créditos: <span id="credits">1</span></div>
+            <input type="text" id="search" placeholder="Código (5 dígitos)">
+            
+        </div>
+        <div class="content">
+            <div class="song-list">
+                <ul id="songs"></ul>
+                <button id="prevPage">Anterior</button>
+                <button id="nextPage">Siguiente</button>
+            </div>
+            <div class="video-section">
+                <div class="current-song" id="currentSong"></div>
+                <video id="videoPlayer" controls></video>
+                <div class="promo-split">
+                    <div class="promo-left">
+                        <img src="rockola://promo1.jpg" alt="Publicidad 1">
+                    </div>
+                    <div class="next-songs" id="nextSongs"></div>
+                    <div class="promo-right">
+                        <img src="rockola://promo2.jpg" alt="Publicidad 2">
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- Contenedor para la notificación -->
+        <div id="notification" class="notification" style="display: none;">Canción no encontrada</div>
+        <!-- Contenedor para la pantalla de sin créditos -->
+        <div id="noCreditsOverlay" class="no-credits-overlay" style="display: none;">Sin créditos</div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
+
+================================================================================
+# Archivo: public\script.js
+================================================================================
+
+document.addEventListener("DOMContentLoaded", async function () {
+    const songList = document.getElementById("songs");
+    const searchInput = document.getElementById("search");
+    const videoPlayer = document.getElementById("videoPlayer");
+    const prevButton = document.getElementById("prevPage");
+    const nextButton = document.getElementById("nextPage");
+    const genreDisplay = document.getElementById("genreDisplay");
+    const creditsElement = document.getElementById("credits");
+    const noCreditsOverlay = document.getElementById("noCreditsOverlay");
+    const notification = document.getElementById("notification");
+    const currentSongDisplay = document.getElementById("currentSong");
+    const nextSongsDisplay = document.getElementById("nextSongs");
+
+    let allSongs = [];
+    let songsData = [];
+    let currentPage = 1;
+    let totalPages = 1;
+    const limit = 26;
+    let currentGenre = '';
+    let genres = [];
+    let genreIndex = 0;
+    let playlist = [];
+    let isPlaying = false;
+    let credits = 1;
+    let holdTimer = null;
+    let currentAudioPlayer = null;
+    let isHoldActive = false;
+
+    document.addEventListener('mousemove', (event) => {
+        if (event.target !== searchInput && event.target !== prevButton && event.target !== nextButton) {
+            event.preventDefault();
+        }
+    });
+
+    document.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        credits++;
+        creditsElement.textContent = credits;
+        checkCredits();
+        searchInput.focus();
+    });
+
+    document.addEventListener('click', (event) => {
+        if (playlist.length > 0 && isPlaying && event.target !== prevButton && event.target !== nextButton) {
+            console.log("Clic izquierdo: Intentando siguiente canción");
+            stopCurrentPlayback();
+            playNextSong();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        const key = event.key;
+        if (/^[0-9]$/.test(key)) {
+            event.preventDefault();
+            if (document.activeElement !== searchInput) searchInput.focus();
+            searchInput.value += key;
+            searchInput.dispatchEvent(new Event('input'));
+        } else if (key === '-') {
+            event.preventDefault();
+            if (genreIndex > 0) {
+                genreIndex--;
+                currentGenre = genres[genreIndex];
+                currentPage = 1;
+                fetchSongs(currentPage, currentGenre);
+            }
+        } else if (key === '+') {
+            event.preventDefault();
+            if (genreIndex < genres.length - 1) {
+                genreIndex++;
+                currentGenre = genres[genreIndex];
+                currentPage = 1;
+                fetchSongs(currentPage, currentGenre);
+            }
+        } else if (key === '/') {
+            event.preventDefault();
+            if (currentPage > 1) {
+                currentPage--;
+                fetchSongs(currentPage, '');
+            }
+        } else if (key === '*') {
+            event.preventDefault();
+            if (currentPage < totalPages) {
+                currentPage++;
+                fetchSongs(currentPage, '');
+            }
+        } else if (key === 'Enter') {
+            event.preventDefault();
+            if (searchInput.value.length > 0) {
+                searchInput.value = searchInput.value.slice(0, -1);
+                searchInput.dispatchEvent(new Event('input'));
+            }
+        } else if (key === '.') {
+            event.preventDefault();
+            if (!isHoldActive) {
+                isHoldActive = true;
+                holdTimer = setTimeout(() => {
+                    if (playlist.length > 0 && isPlaying) {
+                        console.log("Punto: Avanzando a siguiente canción");
+                        stopCurrentPlayback();
+                        playNextSong();
+                    }
+                    isHoldActive = false;
+                }, 5000);
+            }
+        } else if (!['Backspace'].includes(key)) {
+            event.preventDefault();
+        }
+    });
+
+    document.addEventListener('keyup', (event) => {
+        if (event.key === '.') {
+            clearTimeout(holdTimer);
+            isHoldActive = false;
+        }
+    });
+
+    async function fetchGenres() {
+        try {
+            console.log("Intentando cargar géneros...");
+            if (!window.electronAPI) {
+                console.error("electronAPI no está definido");
+                throw new Error("electronAPI no está disponible");
+            }
+            genres = await window.electronAPI.getGenres();
+            console.log("Géneros cargados:", genres);
+            if (genres.length === 0) {
+                console.warn("No se encontraron géneros en la base de datos");
+                genres = ['Todos'];
+            }
+            genreIndex = 0;
+            currentGenre = genres[0];
+            updateGenreDisplay();
+        } catch (error) {
+            console.error("Error en fetchGenres:", error.message);
+            showNotification("Error al cargar géneros");
+            genres = ['Todos'];
+            currentGenre = genres[0];
+            updateGenreDisplay();
+        }
+    }
+
+    async function fetchAllSongs() {
+        try {
+            console.log("Cargando todas las canciones...");
+            allSongs = await window.electronAPI.getAllSongs();
+            console.log("Canciones cargadas:", allSongs);
+            totalPages = Math.ceil(allSongs.length / limit);
+            if (allSongs.length === 0) {
+                console.warn("No se cargaron canciones desde la base de datos");
+                showNotification("No hay canciones disponibles");
+            }
+        } catch (error) {
+            console.error("Error en fetchAllSongs:", error);
+            showNotification("Error al cargar canciones");
+        }
+    }
+
+    async function fetchSongs(page, genre) {
+        try {
+            if (genre && genre !== 'Todos') {
+                const data = await window.electronAPI.getSongs({ page, limit, genre });
+                songsData = data.songs;
+                totalPages = data.totalPages;
+                currentPage = data.currentPage;
+            } else {
+                songsData = allSongs.slice((page - 1) * limit, page * limit);
+                totalPages = Math.ceil(allSongs.length / limit);
+                currentPage = page;
+            }
+            console.log("Canciones renderizadas para página", currentPage, ":", songsData);
+            renderSongs(songsData);
+            updateGenreDisplay();
+        } catch (error) {
+            console.error("Error en fetchSongs:", error);
+            showNotification("Error al cargar canciones");
+        }
+    }
+
+    function renderSongs(songs) {
+        songList.innerHTML = "";
+        songs.forEach(song => {
+            const li = document.createElement("li");
+            li.textContent = `${song.id} - ${song.artist} - ${song.title}`;
+            songList.appendChild(li);
+        });
+    }
+
+    function updateGenreDisplay() {
+        genreDisplay.textContent = `Género actual: ${currentGenre || 'Todos'}`;
+    }
+
+    async function addToPlaylist(path) {
+        if (credits > 0) {
+            console.log("Añadiendo a playlist:", path);
+            playlist.push(path);
+            console.log("Playlist actual:", playlist);
+            credits--;
+            creditsElement.textContent = credits;
+            checkCredits();
+            updateNextSongs();
+            if (!isPlaying) {
+                console.log("No hay reproducción activa, iniciando playNextSong...");
+                playNextSong();
+            }
+        } else {
+            showNoCreditsOverlay();
+            checkCredits();
+        }
+    }
+
+    function stopCurrentPlayback() {
+        if (currentAudioPlayer) {
+            currentAudioPlayer.pause();
+            currentAudioPlayer.remove();
+            currentAudioPlayer = null;
+        }
+        if (videoPlayer.src) {
+            videoPlayer.pause();
+            videoPlayer.src = '';
+            videoPlayer.load();
+        }
+    }
+
+    function playNextSong() {
+        if (playlist.length > 0) {
+            console.log("Reproduciendo próxima canción de la playlist...");
+            stopCurrentPlayback();
+            const nextSong = playlist.shift();
+            console.log("Canción seleccionada:", nextSong);
+            playSong(nextSong);
+            updateNextSongs();
+        } else {
+            isPlaying = false;
+            stopCurrentPlayback();
+            checkCredits();
+            console.log("Playlist vacía, deteniendo reproducción");
+        }
+    }
+
+    async function playSong(path) {
+        const videoPath = "file:///D:/musica_convertida/2024/champeta/Papo Man   El Llanto De Un Rey.mp4";
+        videoPlayer.src = videoPath;
+        await videoPlayer.play();
+      }
+    
+        try {
+            console.log(`Intentando reproducir: ${videoPath}`);
+            
+            // Detener cualquier reproducción actual
+            stopCurrentPlayback();
+            
+            // Breve retraso para asegurar que el video se haya detenido completamente
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+            // Configurar y reproducir el video
+            videoPlayer.src = videoPath;
+            videoPlayer.load();
+            console.log("Intentando reproducir video...");
+            await videoPlayer.play().catch(err => {
+                console.error("Error al reproducir video:", err);
+                throw err;
+            });
+    
+            // Cuando el video termine, reproducir la siguiente canción
+            videoPlayer.onended = () => {
+                console.log("Video terminado");
+                stopCurrentPlayback();
+                playNextSong();
+            };
+    
+        } catch (error) {
+            console.error(`Error general al reproducir ${path}:`, error);
+            stopCurrentPlayback();
+            playNextSong();
+        }
+    }
+
+    function updateCurrentSongDisplay(path) {
+        const song = allSongs.find(s => s.path === path) || { id: "N/A", title: "Desconocido", artist: "Desconocido" };
+        currentSongDisplay.textContent = `Reproduciendo: ${song.id} - ${song.artist} - ${song.title}`;
+    }
+
+    function updateNextSongs() {
+        console.log("Actualizando lista de próximas canciones...");
+        nextSongsDisplay.innerHTML = "";
+        if (playlist.length === 0) {
+            console.log("Playlist vacía, no hay canciones para mostrar");
+            return;
+        }
+        playlist.slice(0, 6).forEach((path, index) => {
+            const song = allSongs.find(s => s.path === path) || { id: "N/A", title: "Desconocido", artist: "Desconocido" };
+            const li = document.createElement("li");
+            li.textContent = `${index + 1}. ${song.id} - ${song.artist} - ${song.title}`;
+            nextSongsDisplay.appendChild(li);
+            console.log(`Añadido a la lista: ${li.textContent}`);
+        });
+    }
+
+    async function checkCredits() {
+        if (credits === 0) {
+            enterFullScreen();
+            disableControls();
+            songList.style.display = 'none';
+            if (playlist.length === 0) {
+                try {
+                    const promo = await window.electronAPI.getPromoVideo();
+                    videoPlayer.src = `rockola://promo/${encodeURIComponent(promo.path)}`;
+                    videoPlayer.loop = true;
+                    videoPlayer.load();
+                    await videoPlayer.play();
+                    isPlaying = false;
+                } catch (error) {
+                    console.error(error);
+                    showNotification("Error al cargar video promocional");
+                }
+            }
+        } else {
+            exitFullScreen();
+            enableControls();
+            songList.style.display = 'block';
+            videoPlayer.loop = false;
+            if (!isPlaying && playlist.length > 0) playNextSong();
+        }
+    }
+
+    function enterFullScreen() {
+        if (videoPlayer.requestFullscreen) videoPlayer.requestFullscreen();
+    }
+
+    function exitFullScreen() {
+        if (document.fullscreenElement) document.exitFullscreen();
+    }
+
+    function disableControls() {
+        searchInput.disabled = true;
+        prevButton.disabled = true;
+        nextButton.disabled = true;
+    }
+
+    function enableControls() {
+        searchInput.disabled = false;
+        prevButton.disabled = false;
+        nextButton.disabled = false;
+        searchInput.focus();
+    }
+
+    function showNoCreditsOverlay() {
+        noCreditsOverlay.style.display = 'flex';
+        setTimeout(() => noCreditsOverlay.style.display = 'none', 2000);
+    }
+
+    function showNotification(message) {
+        notification.textContent = message;
+        notification.style.display = 'block';
+        setTimeout(() => notification.style.display = 'none', 2000);
+    }
+
+    searchInput.addEventListener("input", async function () {
+        const query = searchInput.value.toLowerCase();
+        if (query.length === 5) {
+            console.log("Buscando canción con ID:", query);
+            const song = allSongs.find(s => s.id === query);
+            if (song) {
+                console.log("Canción encontrada:", song);
+                addToPlaylist(song.path);
+                showNotification(`Canción ${song.title} añadida`);
+            } else {
+                console.log("Canción no encontrada para ID:", query);
+                showNotification("Canción no encontrada");
+            }
+            searchInput.value = "";
+            renderSongs(songsData);
+        }
+    });
+
+    prevButton.addEventListener("click", function () {
+        if (currentPage > 1) {
+            currentPage--;
+            fetchSongs(currentPage, '');
+        }
+    });
+
+    nextButton.addEventListener("click", function () {
+        if (currentPage < totalPages) {
+            currentPage++;
+            fetchSongs(currentPage, '');
+        }
+    });
+
+    async function initializeApp() {
+        try {
+            console.log("Inicializando aplicación...");
+            await fetchAllSongs();
+            await fetchGenres();
+            await fetchSongs(currentPage, '');
+            console.log("Aplicación inicializada con éxito");
+        } catch (error) {
+            console.error("Error al inicializar la aplicación:", error);
+        }
+    }
+
+    initializeApp();
+});
+
+================================================================================
+# Archivo: public\styles.css
+================================================================================
+
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f4f4f4;
+    margin: 0;
+    padding: 0;
+}
+.container {
+    width: 100%;
+    margin: auto;
+    background: white;
+    padding: 10px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #d32f2f;
+    color: white;
+    padding: 0px;
+}
+.header h1 {
+    font-size: 24px;
+    margin: 0;
+}
+.credits {
+    font-size: 18px;
+}
+.genre-display {
+    font-size: 18px;
+    color: white;
+    margin-left: 10px;
+}
+.content {
+    display: flex;
+    margin-top: 10px;
+}
+.song-list {
+    width: 50%;
+    padding: 10px;
+    border-right: 2px solid #ddd;
+}
+.song-list ul {
+    list-style: none;
+    padding: 0;
+}
+.song-list li {
+    padding: 5px;
+    border-bottom: 1px solid #ddd;
+    cursor: pointer;
+}
+.video-section {
+    width: 50%;
+    text-align: center;
+}
+.current-song {
+    font-size: 18px;
+    font-weight: bold;
+    padding: 5px;
+    text-align: center;
+}
+video {
+    width: 100%;
+    height: auto;
+}
+.promo-split {
+    display: flex;
+    width: 100%;
+}
+.promo-left, .promo-right {
+    width: 25%;
+}
+.promo-left img, .promo-right img {
+    width: 100%;
+}
+.next-songs {
+    width: 50%;
+    padding: 5px;
+}
+.next-songs ul {
+    list-style: none;
+    padding: 0;
+}
+.next-songs li {
+    padding: 3px;
+    border-bottom: 1px solid #ddd;
+}
+.notification {
+    position: fixed;
+    bottom: 10px;
+    left: 10px;
+    background-color: rgba(0, 0, 0, 0.7);
+    color: white;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+================================================================================
+# Archivo: package.json
+================================================================================
+
+{
+    "name": "rockola-app",
+    "version": "1.0.0",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron ."
+    },
+    "dependencies": {
+        "electron": "^34.2.0",
+        "mime-types": "^2.1.35"
+    }
+}
+
+================================================================================
+# Fin del proyecto
